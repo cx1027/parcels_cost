@@ -37,6 +37,7 @@ class PricedParcel:
 class PricingResult:
     items: list[PricedParcel]
     total_cost: Decimal
+    speedy_shipping: Decimal = Decimal("0")
 
 
 class ParcelPricer:
@@ -51,7 +52,9 @@ class ParcelPricer:
             return PricedParcel(ParcelType.LARGE, Decimal("15"))
         return PricedParcel(ParcelType.XL, Decimal("25"))
 
-    def price_order(self, parcels: list[Parcel]) -> PricingResult:
+    def price_order(self, parcels: list[Parcel], speedy: bool = False) -> PricingResult:
         priced_items = [self.price_parcel(parcel) for parcel in parcels]
-        total = sum((item.cost for item in priced_items), start=Decimal("0"))
-        return PricingResult(items=priced_items, total_cost=total)
+        base_total = sum((item.cost for item in priced_items), start=Decimal("0"))
+        speedy_cost = base_total if speedy else Decimal("0")
+        total = base_total + speedy_cost
+        return PricingResult(items=priced_items, total_cost=total, speedy_shipping=speedy_cost)

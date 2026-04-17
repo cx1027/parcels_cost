@@ -89,6 +89,37 @@ def test_prices_multiple_parcels_and_total():
         ParcelType.XL,
     ]
     assert result.total_cost == Decimal("51")
+    assert result.speedy_shipping == Decimal("0")
+
+
+def test_speedy_shipping_cost_equals_base_total():
+    pricer = ParcelPricer()
+
+    result = pricer.price_order(
+        [
+            Parcel(5, 5, 5),      # Small -> 3
+            Parcel(20, 20, 20),   # Medium -> 8
+        ],
+        speedy=True,
+    )
+
+    assert result.speedy_shipping == Decimal("11")
+    assert result.total_cost == Decimal("22")
+
+
+def test_speedy_shipping_no_impact_on_individual_parcel_cost():
+    pricer = ParcelPricer()
+
+    result = pricer.price_order(
+        [
+            Parcel(5, 5, 5),      # Small -> 3
+            Parcel(20, 20, 20),   # Medium -> 8
+        ],
+        speedy=True,
+    )
+
+    assert result.items[0].cost == Decimal("3")
+    assert result.items[1].cost == Decimal("8")
 
 
 @pytest.mark.parametrize("length,width,height", [
