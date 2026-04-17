@@ -69,27 +69,22 @@ class PricedParcel:
 
 
 @dataclass(frozen=True)
-class Discount:
-    discount_type: str
-    parcel_indices: frozenset[int]
-    saving: Decimal
-
-    def __repr__(self) -> str:
-        return f"Discount({self.discount_type}, indices={set(self.parcel_indices)}, saving={self.saving})"
-
-
-@dataclass(frozen=True)
-class DiscountResult:
-    discounts: list[Discount]
-    total_saving: Decimal
-
-
-@dataclass(frozen=True)
 class PricingResult:
     items: list[PricedParcel]
     total_cost: Decimal
     speedy_shipping: Decimal = Decimal("0")
-    discounted_savings: Decimal = Decimal("0")
+    discounts: list = None
+    discount_saving: Decimal = Decimal("0")
+
+    def __post_init__(self):
+        if self.discounts is None:
+            object.__setattr__(self, 'discounts', [])
+
+
+@dataclass(frozen=True)
+class Discount:
+    name: str
+    saving: Decimal
 
 
 class ParcelPricer:
@@ -116,86 +111,107 @@ class ParcelPricer:
         over_cost = best.overweight_cost_per_kg * Decimal(str(over_kg))
         return PricedParcel(parcel_type=best, cost=calc_cost(best), overweight_cost=over_cost)
 
-    def _find_groups(
-        self,
-        priced: list[PricedParcel],
-        type_filter: ParcelType | None,
-        group_size: int,
-    ) -> list[frozenset[int]]:
-        indices = [i for i, p in enumerate(priced) if type_filter is None or p.parcel_type == type_filter]
-        groups: list[frozenset[int]] = []
-
-        def backtrack(start: int, chosen: list[int]) -> None:
-            if len(chosen) == group_size:
-                groups.append(frozenset(chosen))
-                return
-            for i in range(start, len(indices)):
-                chosen.append(indices[i])
-                backtrack(i + 1, chosen)
-                chosen.pop()
-
-        backtrack(0, [])
-        return groups
-
-    def _calc_saving(self, priced: list[PricedParcel], group: frozenset[int]) -> Decimal:
-        costs = [priced[i].cost for i in group]
-        return min(costs)
-
-    def _search_best_discounts(
-        self,
-        priced: list[PricedParcel],
-    ) -> DiscountResult:
-        discount_defs = [
-            ("Small Mania (4th free)", ParcelType.SMALL, 4),
-            ("Medium Mania (3rd free)", ParcelType.MEDIUM, 3),
-            ("Mixed Mania (5th free)", None, 5),
-        ]
-
-        all_groups: list[tuple[str, frozenset[int], Decimal]] = []
-        for label, ptype, size in discount_defs:
-            groups = self._find_groups(priced, ptype, size)
-            for g in groups:
-                all_groups.append((label, g, self._calc_saving(priced, g)))
-
-        if not all_groups:
-            return DiscountResult(discounts=[], total_saving=Decimal("0"))
-
-        n = len(all_groups)
-        best_saving = Decimal("0")
-        best_discounts: list[Discount] = []
-
-        for mask in range(1, 1 << n):
-            used: set[int] = set()
-            selected: list[Discount] = []
-            total = Decimal("0")
-
-            for j in range(n):
-                if (mask >> j) & 1:
-                    label, group, saving = all_groups[j]
-                    if not used.isdisjoint(group):
-                        break
-                    used.update(group)
-                    selected.append(Discount(label, group, saving))
-                    total += saving
-            else:
-                if total > best_saving:
-                    best_saving = total
-                    best_discounts = selected
-
-        return DiscountResult(discounts=best_discounts, total_saving=best_saving)
-
     def price_order(self, parcels: list[Parcel], speedy: bool = False) -> PricingResult:
         priced_items = [self.price_parcel(parcel) for parcel in parcels]
-        base_total = sum((item.cost for item in priced_items), start=Decimal("0"))
 
-        disc_result = self._search_best_discounts(priced_items)
-        discounted_total = base_total - disc_result.total_saving
-        speedy_cost = discounted_total if speedy else Decimal("0")
-        total = discounted_total + speedy_cost
+        # Categorize by type
+        small = [p for p in priced_items if p.parcel_type == ParcelType.SMALL]
+        medium = [p for p in priced_items if p.parcel_type == ParcelType.MEDIUM]
+        other = [p for p in priced_items if p.parcel_type not in (ParcelType.SMALL, ParcelType.MEDIUM)]
+
+        # Sort each type by cost for optimal grouping
+        sorted_small = sorted(small, key=lambda x: x.cost)
+        sorted_medium = sorted(medium, key=lambda x: x.cost)
+
+        def calc_mixed_savings(remaining: list) -> tuple[Decimal, list]:
+            sorted_rem = sorted(remaining, key=lambda x: x.cost)
+            savings = Decimal("0")
+            discount_items = []
+            while len(sorted_rem) >= 5:
+                group = sorted_rem[:5]
+                free_saving = group[0].cost
+                savings += free_saving
+                discount_items.append(Discount(
+                    name=f"Mixed mania (5 parcels)",
+                    saving=free_saving
+                ))
+                sorted_rem = sorted_rem[5:]
+            return savings, discount_items
+
+        # DP for small and medium manias
+        # State: (small_used, medium_used) = max savings, and path to reconstruct
+        n_small = len(sorted_small)
+        n_medium = len(sorted_medium)
+
+        # dp[si][mi] = (max_saving, path_info)
+        # path_info: list of (type, count)
+        dp = [[(Decimal("0"), []) for _ in range(n_medium + 1)] for _ in range(n_small + 1)]
+
+        for si in range(n_small + 1):
+            for mi in range(n_medium + 1):
+                curr_saving, curr_path = dp[si][mi]
+
+                # Try adding small mania (uses 4 small)
+                if si >= 4:
+                    new_saving = dp[si - 4][mi][0] + sorted_small[si - 4].cost
+                    new_path = dp[si - 4][mi][1] + [("small", 1)]
+                    if new_saving > curr_saving:
+                        dp[si][mi] = (new_saving, new_path)
+
+                # Try adding medium mania (uses 3 medium)
+                if mi >= 3:
+                    new_saving = dp[si][mi - 3][0] + sorted_medium[mi - 3].cost
+                    new_path = dp[si][mi - 3][1] + [("medium", 1)]
+                    if new_saving > curr_saving:
+                        dp[si][mi] = (new_saving, new_path)
+
+        # Get optimal small/medium mania savings
+        mania_saving, mania_info = dp[n_small][n_medium]
+
+        # Count small and medium used in their respective manias
+        small_used_in_manias = sum(4 * count for mtype, count in mania_info if mtype == "small")
+        medium_used_in_manias = sum(3 * count for mtype, count in mania_info if mtype == "medium")
+
+        remaining = sorted_small[small_used_in_manias:] + sorted_medium[medium_used_in_manias:] + other
+        mixed_saving, mixed_discounts = calc_mixed_savings(remaining)
+        total_discount_saving = mania_saving + mixed_saving
+
+        # Build discount details
+        final_discounts = []
+        # Small manias
+        idx_small = 0
+        for mtype, count in mania_info:
+            if mtype == "small":
+                for _ in range(count):
+                    saving = sorted_small[idx_small].cost
+                    final_discounts.append(Discount(
+                        name=f"Small parcel mania (4 parcels)",
+                        saving=saving
+                    ))
+                    idx_small += 4
+        # Medium manias
+        idx_medium = 0
+        for mtype, count in mania_info:
+            if mtype == "medium":
+                for _ in range(count):
+                    saving = sorted_medium[idx_medium].cost
+                    final_discounts.append(Discount(
+                        name=f"Medium parcel mania (3 parcels)",
+                        saving=saving
+                    ))
+                    idx_medium += 3
+        final_discounts.extend(mixed_discounts)
+
+        base_total = sum((item.cost for item in priced_items), start=Decimal("0"))
+        discount_total = sum(d.saving for d in final_discounts)
+        after_discount = base_total - discount_total
+        speedy_cost = after_discount if speedy else Decimal("0")
+        total = after_discount + speedy_cost
 
         return PricingResult(
             items=priced_items,
             total_cost=total,
             speedy_shipping=speedy_cost,
-            discounted_savings=disc_result.total_saving,
+            discounts=final_discounts,
+            discount_saving=discount_total
         )
