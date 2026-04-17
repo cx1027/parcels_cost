@@ -126,7 +126,7 @@ class ParcelPricer:
 
         priced_items = [self.price_parcel(parcel, speedy[i]) for i, parcel in enumerate(parcels)]
 
-        # 判断订单类型：所有包裹都是 SMALL 则是 SMALL，都是 MEDIUM 则是 MEDIUM，否则是 OTHER
+        # categorize parcel types:SMALL，MEDIUM or OTHER
         if all(p.parcel_type == ParcelType.SMALL for p in priced_items):
             order_type = ParcelType.SMALL
             group_size = 4
@@ -156,7 +156,7 @@ class ParcelPricer:
         base_total = sum((item.cost for item in priced_items), start=Decimal("0"))
         discount_total, final_discounts, free_indices = calc_group_savings(priced_items, group_size, label)
 
-        # 将免费包裹的 speedy_cost 设为 0
+        # if parcel is free then speedy_cost is 0
         for idx in free_indices:
             priced_items[idx] = PricedParcel(
                 parcel_type=priced_items[idx].parcel_type,
