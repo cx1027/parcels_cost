@@ -9,26 +9,37 @@ class ParcelType(str, Enum):
     MEDIUM = "Medium"
     LARGE = "Large"
     XL = "XL"
+    HEAVY = "Heavy"
 
     @property
     def weight_limit_kg(self) -> float:
-        limits = {
+        return {
             ParcelType.SMALL: 1.0,
             ParcelType.MEDIUM: 3.0,
             ParcelType.LARGE: 6.0,
             ParcelType.XL: 10.0,
-        }
-        return limits[self]
+            ParcelType.HEAVY: 50.0,
+        }[self]
 
     @property
     def base_cost(self) -> Decimal:
-        costs = {
+        return {
             ParcelType.SMALL: Decimal("3"),
             ParcelType.MEDIUM: Decimal("8"),
             ParcelType.LARGE: Decimal("15"),
             ParcelType.XL: Decimal("25"),
-        }
-        return costs[self]
+            ParcelType.HEAVY: Decimal("50"),
+        }[self]
+
+    @property
+    def overweight_cost_per_kg(self) -> Decimal:
+        return {
+            ParcelType.SMALL: Decimal("2"),
+            ParcelType.MEDIUM: Decimal("2"),
+            ParcelType.LARGE: Decimal("2"),
+            ParcelType.XL: Decimal("2"),
+            ParcelType.HEAVY: Decimal("1"),
+        }[self]
 
 
 @dataclass(frozen=True)
@@ -65,27 +76,28 @@ class PricingResult:
 
 
 class ParcelPricer:
-    OVERWEIGHT_COST_PER_KG = Decimal("2")
-
     def price_parcel(self, parcel: Parcel) -> PricedParcel:
         max_dimension = max(parcel.length_cm, parcel.width_cm, parcel.height_cm)
 
-        if max_dimension < 10:
-            parcel_type = ParcelType.SMALL
-        elif max_dimension < 50:
-            parcel_type = ParcelType.MEDIUM
-        elif max_dimension < 100:
-            parcel_type = ParcelType.LARGE
+        if max_dimension >= 100:
+            dimension_types = [ParcelType.XL]
+        elif max_dimension >= 50:
+            dimension_types = [ParcelType.LARGE]
+        elif max_dimension >= 10:
+            dimension_types = [ParcelType.MEDIUM]
         else:
-            parcel_type = ParcelType.XL
+            dimension_types = [ParcelType.SMALL]
 
-        base_cost = parcel_type.base_cost
-        weight_limit = parcel_type.weight_limit_kg
-        overweight_kg = max(0.0, parcel.weight_kg - weight_limit)
-        overweight_cost = self.OVERWEIGHT_COST_PER_KG * Decimal(str(overweight_kg))
-        total_cost = base_cost + overweight_cost
+        def calc_cost(pt: ParcelType) -> Decimal:
+            limit = pt.weight_limit_kg
+            over = max(0.0, parcel.weight_kg - limit)
+            return pt.base_cost + pt.overweight_cost_per_kg * Decimal(str(over))
 
-        return PricedParcel(parcel_type=parcel_type, cost=total_cost, overweight_cost=overweight_cost)
+        candidates = dimension_types + [ParcelType.HEAVY]
+        best = min(candidates, key=calc_cost)
+        over_kg = max(0.0, parcel.weight_kg - best.weight_limit_kg)
+        over_cost = best.overweight_cost_per_kg * Decimal(str(over_kg))
+        return PricedParcel(parcel_type=best, cost=calc_cost(best), overweight_cost=over_cost)
 
     def price_order(self, parcels: list[Parcel], speedy: bool = False) -> PricingResult:
         priced_items = [self.price_parcel(parcel) for parcel in parcels]
