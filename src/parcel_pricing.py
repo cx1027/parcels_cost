@@ -66,19 +66,22 @@ class PricedParcel:
     parcel_type: ParcelType
     cost: Decimal
     overweight_cost: Decimal = Decimal("0")
+    speedy_cost: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
 class PricingResult:
     items: list[PricedParcel]
     total_cost: Decimal
-    speedy_shipping: Decimal = Decimal("0")
+    speedy_shipping: list[Decimal] = None
     discounts: list = None
     discount_saving: Decimal = Decimal("0")
 
     def __post_init__(self):
         if self.discounts is None:
             object.__setattr__(self, 'discounts', [])
+        if self.speedy_shipping is None:
+            object.__setattr__(self, 'speedy_shipping', [])
 
 
 @dataclass(frozen=True)
@@ -88,7 +91,7 @@ class Discount:
 
 
 class ParcelPricer:
-    def price_parcel(self, parcel: Parcel) -> PricedParcel:
+    def price_parcel(self, parcel: Parcel, speedy: bool = False) -> PricedParcel:
         max_dimension = max(parcel.length_cm, parcel.width_cm, parcel.height_cm)
 
         if max_dimension >= 100:
@@ -109,109 +112,67 @@ class ParcelPricer:
         best = min(candidates, key=calc_cost)
         over_kg = max(0.0, parcel.weight_kg - best.weight_limit_kg)
         over_cost = best.overweight_cost_per_kg * Decimal(str(over_kg))
-        return PricedParcel(parcel_type=best, cost=calc_cost(best), overweight_cost=over_cost)
+        base_cost = calc_cost(best)
+        speedy_price = base_cost if speedy else Decimal("0")
+        return PricedParcel(parcel_type=best, cost=base_cost, overweight_cost=over_cost, speedy_cost=speedy_price)
 
-    def price_order(self, parcels: list[Parcel], speedy: bool = False) -> PricingResult:
-        priced_items = [self.price_parcel(parcel) for parcel in parcels]
+    def price_order(self, parcels: list[Parcel], speedy: list[bool] | bool = None) -> PricingResult:
+        if speedy is None:
+            speedy = [False] * len(parcels)
+        elif isinstance(speedy, bool):
+            speedy = [speedy] * len(parcels)
+        elif len(speedy) != len(parcels):
+            raise ValueError("speedy list must have the same length as parcels list")
 
-        # Categorize by type
-        small = [p for p in priced_items if p.parcel_type == ParcelType.SMALL]
-        medium = [p for p in priced_items if p.parcel_type == ParcelType.MEDIUM]
-        other = [p for p in priced_items if p.parcel_type not in (ParcelType.SMALL, ParcelType.MEDIUM)]
+        priced_items = [self.price_parcel(parcel, speedy[i]) for i, parcel in enumerate(parcels)]
 
-        # Sort each type by cost for optimal grouping
-        sorted_small = sorted(small, key=lambda x: x.cost)
-        sorted_medium = sorted(medium, key=lambda x: x.cost)
+        # 判断订单类型：所有包裹都是 SMALL 则是 SMALL，都是 MEDIUM 则是 MEDIUM，否则是 OTHER
+        if all(p.parcel_type == ParcelType.SMALL for p in priced_items):
+            order_type = ParcelType.SMALL
+            group_size = 4
+        elif all(p.parcel_type == ParcelType.MEDIUM for p in priced_items):
+            order_type = ParcelType.MEDIUM
+            group_size = 3
+        else:
+            order_type = "Other"
+            group_size = 5
 
-        def calc_mixed_savings(remaining: list) -> tuple[Decimal, list]:
-            sorted_rem = sorted(remaining, key=lambda x: x.cost)
+        label = "Small parcel" if order_type == ParcelType.SMALL else "Medium parcel" if order_type == ParcelType.MEDIUM else "Mixed"
+
+        def calc_group_savings(items: list[PricedParcel], group_size: int, label: str) -> tuple[Decimal, list[Discount], list[int]]:
             savings = Decimal("0")
-            discount_items = []
-            while len(sorted_rem) >= 5:
-                group = sorted_rem[:5]
-                free_saving = group[0].cost
-                savings += free_saving
-                discount_items.append(Discount(
-                    name=f"Mixed mania (5 parcels)",
-                    saving=free_saving
-                ))
-                sorted_rem = sorted_rem[5:]
-            return savings, discount_items
-
-        # DP for small and medium manias
-        # State: (small_used, medium_used) = max savings, and path to reconstruct
-        n_small = len(sorted_small)
-        n_medium = len(sorted_medium)
-
-        # dp[si][mi] = (max_saving, path_info)
-        # path_info: list of (type, count)
-        dp = [[(Decimal("0"), []) for _ in range(n_medium + 1)] for _ in range(n_small + 1)]
-
-        for si in range(n_small + 1):
-            for mi in range(n_medium + 1):
-                curr_saving, curr_path = dp[si][mi]
-
-                # Try adding small mania (uses 4 small)
-                if si >= 4:
-                    new_saving = dp[si - 4][mi][0] + sorted_small[si - 4].cost
-                    new_path = dp[si - 4][mi][1] + [("small", 1)]
-                    if new_saving > curr_saving:
-                        dp[si][mi] = (new_saving, new_path)
-
-                # Try adding medium mania (uses 3 medium)
-                if mi >= 3:
-                    new_saving = dp[si][mi - 3][0] + sorted_medium[mi - 3].cost
-                    new_path = dp[si][mi - 3][1] + [("medium", 1)]
-                    if new_saving > curr_saving:
-                        dp[si][mi] = (new_saving, new_path)
-
-        # Get optimal small/medium mania savings
-        mania_saving, mania_info = dp[n_small][n_medium]
-
-        # Count small and medium used in their respective manias
-        small_used_in_manias = sum(4 * count for mtype, count in mania_info if mtype == "small")
-        medium_used_in_manias = sum(3 * count for mtype, count in mania_info if mtype == "medium")
-
-        remaining = sorted_small[small_used_in_manias:] + sorted_medium[medium_used_in_manias:] + other
-        mixed_saving, mixed_discounts = calc_mixed_savings(remaining)
-        total_discount_saving = mania_saving + mixed_saving
-
-        # Build discount details
-        final_discounts = []
-        # Small manias
-        idx_small = 0
-        for mtype, count in mania_info:
-            if mtype == "small":
-                for _ in range(count):
-                    saving = sorted_small[idx_small].cost
-                    final_discounts.append(Discount(
-                        name=f"Small parcel mania (4 parcels)",
-                        saving=saving
-                    ))
-                    idx_small += 4
-        # Medium manias
-        idx_medium = 0
-        for mtype, count in mania_info:
-            if mtype == "medium":
-                for _ in range(count):
-                    saving = sorted_medium[idx_medium].cost
-                    final_discounts.append(Discount(
-                        name=f"Medium parcel mania (3 parcels)",
-                        saving=saving
-                    ))
-                    idx_medium += 3
-        final_discounts.extend(mixed_discounts)
+            discounts = []
+            free_indices = []
+            for i in range(0, len(items), group_size):
+                group = items[i:i + group_size]
+                if len(group) == group_size:
+                    free_item_idx = i + group.index(min(group, key=lambda x: x.cost))
+                    free = items[free_item_idx]
+                    savings += free.cost
+                    discounts.append(Discount(name=f"{label} mania ({group_size} parcels)", saving=free.cost))
+                    free_indices.append(free_item_idx)
+            return savings, discounts, free_indices
 
         base_total = sum((item.cost for item in priced_items), start=Decimal("0"))
-        discount_total = sum(d.saving for d in final_discounts)
+        discount_total, final_discounts, free_indices = calc_group_savings(priced_items, group_size, label)
+
+        # 将免费包裹的 speedy_cost 设为 0
+        for idx in free_indices:
+            priced_items[idx] = PricedParcel(
+                parcel_type=priced_items[idx].parcel_type,
+                cost=priced_items[idx].cost,
+                overweight_cost=priced_items[idx].overweight_cost,
+                speedy_cost=Decimal("0")
+            )
+
+        speedy_shipping_cost = sum((item.speedy_cost for item in priced_items), start=Decimal("0"))
         after_discount = base_total - discount_total
-        speedy_cost = after_discount if speedy else Decimal("0")
-        total = after_discount + speedy_cost
+        total = after_discount + speedy_shipping_cost
 
         return PricingResult(
             items=priced_items,
             total_cost=total,
-            speedy_shipping=speedy_cost,
+            speedy_shipping=speedy_shipping_cost,
             discounts=final_discounts,
             discount_saving=discount_total
         )
