@@ -69,10 +69,27 @@ class PricedParcel:
 
 
 @dataclass(frozen=True)
+class Discount:
+    discount_type: str
+    parcel_indices: frozenset[int]
+    saving: Decimal
+
+    def __repr__(self) -> str:
+        return f"Discount({self.discount_type}, indices={set(self.parcel_indices)}, saving={self.saving})"
+
+
+@dataclass(frozen=True)
+class DiscountResult:
+    discounts: list[Discount]
+    total_saving: Decimal
+
+
+@dataclass(frozen=True)
 class PricingResult:
     items: list[PricedParcel]
     total_cost: Decimal
     speedy_shipping: Decimal = Decimal("0")
+    discounted_savings: Decimal = Decimal("0")
 
 
 class ParcelPricer:
@@ -99,9 +116,86 @@ class ParcelPricer:
         over_cost = best.overweight_cost_per_kg * Decimal(str(over_kg))
         return PricedParcel(parcel_type=best, cost=calc_cost(best), overweight_cost=over_cost)
 
+    def _find_groups(
+        self,
+        priced: list[PricedParcel],
+        type_filter: ParcelType | None,
+        group_size: int,
+    ) -> list[frozenset[int]]:
+        indices = [i for i, p in enumerate(priced) if type_filter is None or p.parcel_type == type_filter]
+        groups: list[frozenset[int]] = []
+
+        def backtrack(start: int, chosen: list[int]) -> None:
+            if len(chosen) == group_size:
+                groups.append(frozenset(chosen))
+                return
+            for i in range(start, len(indices)):
+                chosen.append(indices[i])
+                backtrack(i + 1, chosen)
+                chosen.pop()
+
+        backtrack(0, [])
+        return groups
+
+    def _calc_saving(self, priced: list[PricedParcel], group: frozenset[int]) -> Decimal:
+        costs = [priced[i].cost for i in group]
+        return min(costs)
+
+    def _search_best_discounts(
+        self,
+        priced: list[PricedParcel],
+    ) -> DiscountResult:
+        discount_defs = [
+            ("Small Mania (4th free)", ParcelType.SMALL, 4),
+            ("Medium Mania (3rd free)", ParcelType.MEDIUM, 3),
+            ("Mixed Mania (5th free)", None, 5),
+        ]
+
+        all_groups: list[tuple[str, frozenset[int], Decimal]] = []
+        for label, ptype, size in discount_defs:
+            groups = self._find_groups(priced, ptype, size)
+            for g in groups:
+                all_groups.append((label, g, self._calc_saving(priced, g)))
+
+        if not all_groups:
+            return DiscountResult(discounts=[], total_saving=Decimal("0"))
+
+        n = len(all_groups)
+        best_saving = Decimal("0")
+        best_discounts: list[Discount] = []
+
+        for mask in range(1, 1 << n):
+            used: set[int] = set()
+            selected: list[Discount] = []
+            total = Decimal("0")
+
+            for j in range(n):
+                if (mask >> j) & 1:
+                    label, group, saving = all_groups[j]
+                    if not used.isdisjoint(group):
+                        break
+                    used.update(group)
+                    selected.append(Discount(label, group, saving))
+                    total += saving
+            else:
+                if total > best_saving:
+                    best_saving = total
+                    best_discounts = selected
+
+        return DiscountResult(discounts=best_discounts, total_saving=best_saving)
+
     def price_order(self, parcels: list[Parcel], speedy: bool = False) -> PricingResult:
         priced_items = [self.price_parcel(parcel) for parcel in parcels]
         base_total = sum((item.cost for item in priced_items), start=Decimal("0"))
-        speedy_cost = base_total if speedy else Decimal("0")
-        total = base_total + speedy_cost
-        return PricingResult(items=priced_items, total_cost=total, speedy_shipping=speedy_cost)
+
+        disc_result = self._search_best_discounts(priced_items)
+        discounted_total = base_total - disc_result.total_saving
+        speedy_cost = discounted_total if speedy else Decimal("0")
+        total = discounted_total + speedy_cost
+
+        return PricingResult(
+            items=priced_items,
+            total_cost=total,
+            speedy_shipping=speedy_cost,
+            discounted_savings=disc_result.total_saving,
+        )
