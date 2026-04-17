@@ -131,3 +131,72 @@ def test_speedy_shipping_no_impact_on_individual_parcel_cost():
 def test_invalid_dimensions_raise(length, width, height):
     with pytest.raises(ValueError):
         Parcel(length, width, height)
+
+
+def test_invalid_weight_raises():
+    with pytest.raises(ValueError):
+        Parcel(5, 5, 5, weight_kg=-1)
+
+
+def test_small_parcel_at_weight_limit_no_overweight():
+    pricer = ParcelPricer()
+    result = pricer.price_parcel(Parcel(9, 9, 9, weight_kg=1.0))
+    assert result.parcel_type == ParcelType.SMALL
+    assert result.cost == Decimal("3")
+    assert result.overweight_cost == Decimal("0")
+
+
+def test_small_parcel_over_weight_limit():
+    pricer = ParcelPricer()
+    result = pricer.price_parcel(Parcel(9, 9, 9, weight_kg=2.0))
+    assert result.parcel_type == ParcelType.SMALL
+    assert result.cost == Decimal("5")
+    assert result.overweight_cost == Decimal("2")
+
+
+def test_small_parcel_over_weight_limit_multiple_kg():
+    pricer = ParcelPricer()
+    result = pricer.price_parcel(Parcel(9, 9, 9, weight_kg=4.0))
+    assert result.parcel_type == ParcelType.SMALL
+    assert result.cost == Decimal("9")
+    assert result.overweight_cost == Decimal("6")
+
+
+def test_medium_parcel_over_weight_limit():
+    pricer = ParcelPricer()
+    result = pricer.price_parcel(Parcel(20, 20, 20, weight_kg=5.0))
+    assert result.parcel_type == ParcelType.MEDIUM
+    assert result.cost == Decimal("12")
+    assert result.overweight_cost == Decimal("4")
+
+
+def test_large_parcel_over_weight_limit():
+    pricer = ParcelPricer()
+    result = pricer.price_parcel(Parcel(70, 30, 30, weight_kg=8.0))
+    assert result.parcel_type == ParcelType.LARGE
+    assert result.cost == Decimal("19")
+    assert result.overweight_cost == Decimal("4")
+
+
+def test_xl_parcel_over_weight_limit():
+    pricer = ParcelPricer()
+    result = pricer.price_parcel(Parcel(120, 1, 1, weight_kg=15.0))
+    assert result.parcel_type == ParcelType.XL
+    assert result.cost == Decimal("35")
+    assert result.overweight_cost == Decimal("10")
+
+
+def test_order_with_overweight_and_speedy():
+    pricer = ParcelPricer()
+    result = pricer.price_order(
+        [
+            Parcel(5, 5, 5, weight_kg=4.0),    # Small +3kg overweight -> 3+6=9
+            Parcel(20, 20, 20, weight_kg=5.0),  # Medium +2kg overweight -> 8+4=12
+        ],
+        speedy=True,
+    )
+    base_total = Decimal("9") + Decimal("12")
+    assert result.items[0].overweight_cost == Decimal("6")
+    assert result.items[1].overweight_cost == Decimal("4")
+    assert result.speedy_shipping == base_total
+    assert result.total_cost == base_total * 2
